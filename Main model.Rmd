@@ -1,0 +1,140 @@
+---
+title: "02-01-Main models_weekly"
+author: "Zhengyu Yang"
+date: '2024-11-22'
+output: html_document
+---
+In this script, rather than daily, weekly counts were used as the Y in models.
+
+# Library
+```{r}
+library(data.table); library(lubridate); library(tidyverse)
+library(dlnm); library(pbs); library(splines); library(mixmeta)
+library(ggplot2)
+```
+
+# Parameters
+```{r}
+# Parameters
+l <- 26  # period of expected lag effect, unit: week
+df <- 4  # degree of freedom for natural spline
+
+# Dataset
+dataset <- readRDS(r"(S:\MNHS-SPHPM-EPM\Multi-Country-Study\Publications\Papers\Flood_Respiratory_morbidity_Zhengyu_Yang\Data\Dataset_used_for_analyses\Hospitalization_weekly.rds)")
+dataset[, flood_days_01 := ifelse(flood_days_no>=1, 1, 0)]
+summary(dataset$flood_days_01)
+
+# Disease names
+disease_name <- c("All_Resp", 
+                  "Acute_upper_respiratory_infections", 
+                  "Pneumonia", "Acute_lower_respiratory_infections",
+                  "COPD_2",
+                  "Asthma")
+```
+
+# Function: stage1
+```{r}
+# out <- disease_name[1]
+error_warning <- data.table(outcome = character(), 
+                            LocIDLarge = character(), 
+                            message_type = character(), 
+                            message = character())  # To store error/warning messages for each outcome and location combination.
+
+fun_stage1 <- function(out) {
+  stage1list <- list()
+  outcome <- out  # Set the outcome variable of interest
+  ## Exclude observations with missing in variables
+  tmp1 <- unique(dataset[!is.na(dataset[[outcome]]), LocIDLarge])  # Keep all cities with the outcome even if there are missing values 
+  dataset_sub <- dataset[LocIDLarge %in% tmp1,]
+  
+  ## Cities will be investigated
+  city_vector <- copy(tmp1)
+  
+  for (c in 1:length(city_vector)) {
+    c_no <- city_vector[c]
+    DT <- dataset[LocIDLarge==c_no,]
+    DT <- DT[order(date),]
+    daily_count <- mean(DT[[outcome]], na.rm = T)
+    
+    tmp_result <- tryCatch({
+      # Crossbasis for inundation
+      cb_flood <- crossbasis(DT$flood_days_01, lag=l,
+                                 argvar=list(fun="lin"),
+                                 arglag=list(fun="ns", df=df))
+      # Crossbasis for tmean
+      cb_tmean <- crossbasis(DT$tmean, lag=3,
+                             argvar=list(fun="bs", degree=2,
+                                         knots=quantile(DT$tmean, c(10,75,90)/100, na.rm=T)),
+                             arglag=list(knots=logknots(3, 2)))
+      # Crossbasis for tmean
+      cb_rainfall <- crossbasis(DT$rainfall, lag=2,
+                             argvar=list(fun="bs", degree=2,
+                                         knots=quantile(DT$tmean, c(10,75,90)/100, na.rm=T)),
+                             arglag=list(knots=logknots(2, 2)))
+      # One basis for seasonality
+      k_seas <- equalknots(yday(DT$date), 3)
+      b_seas <- onebasis(yday(DT$date), fun="pbs", knots=k_seas)
+      # Model
+      mformula <- formula(paste0(outcome," ~ cb_flood+cb_tmean+cb_rainfall+b_seas+bs(date,df=3)"))  ##
+      mod <- glm(mformula, data=DT, family = quasipoisson, na.action = "na.exclude")
+
+      # Store results: coef/vcov, residuals, overdispersion
+      loglik <- sum(dpois(mod$y,mod$fitted.values,log=TRUE))
+      disp <- sum(residuals(mod,type="pearson")^2, na.rm=T)/mod$df.res
+      list(coef=coef(mod),
+           vcov=vcov(mod)
+           # dispersion=disp,
+           # residuals=residuals(mod, type="deviance")
+           )
+    }, warning = function(w) {
+      error_warning <<- rbind(error_warning, data.table(outcome = outcome, LocIDLarge = c_no, message_type = "warning", message = conditionMessage(w)))
+      NULL
+    }, error = function(e){
+      error_warning <<- rbind(error_warning, data.table(outcome = outcome, LocIDLarge = c_no, message_type = "error", message = conditionMessage(e)))
+      NULL
+    })
+
+    # Do not store the result if there is an error or warning
+    if(!is.null(tmp_result)) {
+      stage1list[[c_no]] <- tmp_result
+    }
+  }
+  return(stage1list)
+}
+```
+
+# Models: stage 1 and stage 2
+```{r}
+stage1list <- list()  # used by fun_stage1
+stage1_list <- list()  # To store location-specific estimates
+stage2_list <- list()  # To store data for nonlinear plots
+for(out in disease_name) {
+  tryCatch({
+    # Stage 1
+    stage1 <- fun_stage1(out)
+    stage1_list[[out]] <- stage1
+    # Stage 2
+    indpost <- grep("cb_flood", names(stage1[[1]]$coef))
+    coefpost <- t(sapply(stage1, function(x) x$coef[indpost]))
+    Scov <- lapply(stage1, function(x) x$vcov[indpost,indpost])
+    metapost <- mixmeta(coefpost, Scov, method="ml")
+
+    # For nonlinear plot
+    cb_flood <- crossbasis(dataset$flood_days_01, lag=l,
+                             argvar=list(fun="lin"),
+                             arglag=list(fun="ns", df=df))
+    bylag <- 0.1
+    cppost <- crosspred(basis=cb_flood, coef=coef(metapost), vcov=vcov(metapost),
+                        bylag=bylag, model.link="log", cen=0, at = 1)
+    stage2_list[[out]] <- data.table(lag=seq(0,l,bylag),
+                                     rr=cppost$matRRfit[1,],
+                                     rrlow=cppost$matRRlow[1,],
+                                     rrhigh=cppost$matRRhigh[1,])
+  }, warning = function(w) {
+    print(paste0("Warning occurred in iteration ", out, ": ", conditionMessage(w)))
+  }, error = function(e) {
+    print(paste0("Error occurred in iteration ", out, ": ", conditionMessage(e)))
+  })
+}
+```
+
