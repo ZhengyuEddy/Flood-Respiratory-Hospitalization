@@ -1,11 +1,9 @@
 ---
 title: "02-01-Main models_weekly"
 author: "Zhengyu Yang"
-date: '2024-11-22'
+date: '2025-11-22'
 output: html_document
 ---
-In this script, rather than daily, weekly counts were used as the Y in models.
-
 # Library
 ```{r}
 library(data.table); library(lubridate); library(tidyverse)
@@ -20,9 +18,7 @@ l <- 26  # period of expected lag effect, unit: week
 df <- 4  # degree of freedom for natural spline
 
 # Dataset
-dataset <- readRDS(r"(S:\MNHS-SPHPM-EPM\Multi-Country-Study\Publications\Papers\Flood_Respiratory_morbidity_Zhengyu_Yang\Data\Dataset_used_for_analyses\Hospitalization_weekly.rds)")
-dataset[, flood_days_01 := ifelse(flood_days_no>=1, 1, 0)]
-summary(dataset$flood_days_01)
+dataset
 
 # Disease names
 disease_name <- c("All_Resp", 
